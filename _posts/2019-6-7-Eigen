@@ -1,0 +1,59 @@
+---
+layout: post
+mathjax: true
+title: An approximative, randomized 'eigen' algorithm
+---
+
+I am currently preparing some 'demo' teaching sessions around a few subjects:
+- Multithreaded & lock-less C++
+- (Kalman) filtering
+- Trading strategy backtesting, the technical part, i.e. /not/ the strategies generation process per se
+- likely, a few other subjects... later.
+
+While looking at Kalman filter litterature, I had an extra look at so-called tuning methods.
+
+Let us put some background.
+
+In its linear, discrete time form, Kalman filters can be described by the following equations
+
+$
+\begin{array}{lcl}
+x_{t+1} &=& Ax + w \\
+y &=& Cx + v \\
+\left( \begin{array}{c} w \\ v \end{array} \right) & \tilde & 
+N \left( 0, 
+  \left(
+  \begin{array}{cc}
+    Q_w & 0 \\
+    0 & R_v
+  \end{array}
+  \right)
+\right)
+\end{array} 
+$
+
+Now, the best case is when covariance matrices $ Q_w $ & $ R_v $ are known.
+In my last real-world usage of filters (spot-vol dynamics of EQ implied vol surfaces, if you ask), due to the way I used data, 
+this was not a problem as everything is 'observable' eventually (as in: can be measured, not the matrix rank observability).
+But what do you do if you cannot really observe empirical errors? One scenario I can imagine is when you are using some sensor 
+and, well, cross checking would require... uhh, the same sensor and it all depends on physical calibration of your embedded 
+system and this is just a pain, at the very last... 
+
+One possible method consists in estimating maximum likelihood.
+Without much ado, we end up with a matrix optimization problem.
+
+$
+
+\underset{R_w, Q_w}{min}{ ln det P_{R_w,Q_w} + Y' P^{-1}_{R_w, Q_w} Y } \\
+s.t. Q_w, R_w \geq 0 \\
+P_{R_w,Q_w} = \overset{N+K-1}{\underset{i=1}{\Sigma}} O_i Q_w O'_i
++ \overset{N}{\underset{j=1}{\Sigma}}II_j R_v II_j'
+$
+
+One solution is to decompose $ P $, Cholesky or other. Note that $ P $ is quite sparse.
+To this end, I want to suggest, at least as a demo, some randomized matrix algorithm to find the Eigen decomposition.
+The little experience I have with generalized sparse matrix packages make it unsuitable as a first demo: too much code, and 
+so how do you embed that much code in your embedded solution? Who will audit the code?
+So let us expose this algorithm...
+
+... TBC (partial post) ...
