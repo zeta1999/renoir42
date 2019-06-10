@@ -22,7 +22,8 @@ Today, let us focus on the [Python case](https://github.com/zeta1999/TensorDimCh
 
 The trick of the matter is to encode dimensions as a abstract type parameters. Writing code in such a generic way will 
 on principle, later allow to add an extra optimization loop for metaparameter tuning: get a model which is as big as needed
-but not much more, hence allowing for faster inference and re-training.
+but not much more, hence allowing for faster inference and re-training. The important nuance here is that model instanciation
+would *always* work as tensor dimensions are validated automatically.
 
 Let us first define (abstract) dimensions: A,B,C,D.
 
@@ -47,6 +48,40 @@ So that some tensor can be declared as being of size $ A \times B $.
 t3: Transition.Tensor2[E, float, A, B]
   = Transition.ones2(s, float, A(), B())
 {% endhighlight %}
+
+The core trick/cheat here is allow for dimensions check to happen almost at compile/lint check before actually running the 
+tensor code.
+In Python, one way to do it is to have check-only code in the file toplevel while code itself is in a $ def() $ block.
+Here, transition is the name of the proof of concept package we are 
+[building](https://github.com/zeta1999/TensorDimCheckIDEPython)...
+
+{% highlight python %}
+import Transition
+[...]
+
+ctx: Transition.Context = Transition.Context()
+
+[...]
+
+conv1d : Callable[[Transition.Tensor3[E,float, A,B, C]],
+    Transition.Tensor3[E,float, A, B, Q]] 
+    = Transition.conv1d_(Q(), 
+    float, ctx, C(), B(), B(), 
+    Transition._4(), 
+    Transition._3(), 
+    Transition._3(), 
+    Transition._3(), 
+    Transition._3()) 
+
+def example01(s: Transition.Session[E]):
+    [...]
+    t6: Transition.Tensor3[E, float, A, B, C] 
+    = Transition.ones3(s, float, A(), B(), C())
+    t7: Transition.Tensor3[E, float, A, B, Q] = conv1d(t6)
+{% endhighlight %}
+
+Then, when running the source file...
+![Run python](RunPython.png)
 
 Next we will have a look at Ocaml (as there are [Ocaml bidings to LibTorch](https://github.com/LaurentMazare/ocaml-torch) ) and
 C++.
