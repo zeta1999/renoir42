@@ -3,7 +3,7 @@ layout: post
 mathjax: true
 title: Incomplete Post, Some ways to check tensor size in IDE
 ---
-Nota bene: tis is only a proof of concept at this stage.
+Nota bene: this is only a *proof of concept* at this stage.
 
 If you ever try to play around with one of the tensorflow, pytorch/libtorch you will without any doubt find tracking tensor
 dimensions a pain in the... neck.
@@ -20,9 +20,9 @@ thus making future debugging... possible/endurable! ;-)
 
 Today, let us focus on the [Python case](https://github.com/zeta1999/TensorDimCheckIDEPython).
 
-The trick of the matter is to encode dimensions as a abstract type parameters. Writing code in such a generic way will allow 
-later to add an extra optimization loop for metaparameter tuning: get a model which is as big as needed but not much more, 
-hence allowing for faster inference and re-training.
+The trick of the matter is to encode dimensions as a abstract type parameters. Writing code in such a generic way will 
+on principle, later allow to add an extra optimization loop for metaparameter tuning: get a model which is as big as needed
+but not much more, hence allowing for faster inference and re-training.
 
 Let us first define (abstract) dimensions: A,B,C,D.
 
@@ -41,7 +41,11 @@ class D:
         return "D"
 {% endhighlight %}
 
-[TBC]
+So that some tensor can be declared as being of size $ A \mul B $.
+
+{% highlight python %}
+t3: Transition.Tensor2[E, float, A, B] = Transition.ones2(s, float, A(), B())
+{% endhighlight %}
 
 Next we will have a look at Ocaml (as there are [Ocaml bidings to LibTorch](https://github.com/LaurentMazare/ocaml-torch) ) and
 C++.
