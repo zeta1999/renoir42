@@ -117,7 +117,9 @@ Please note, when changing a dimension in an unappropriate way from the example 
 ![IDEError](https://zeta1999.github.io/renoir42//images/TensorDimCheckIDEPython/IDEError.png)
 
 I kind of like it already! ;-)
+
 Full IDE integration would then mean to add an automatic run of some dummy unit test to trigger SMT checks whenever necessary...
+
 This is left as an exercise for a next time.
 
 Code @ [Python case](https://github.com/zeta1999/TensorDimCheckIDEPython)
