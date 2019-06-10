@@ -1,7 +1,7 @@
 ---
 layout: post
 mathjax: true
-title: (Incomplete Post) Some ways to check tensor size in IDE (post 1: python)
+title: Incomplete Post, Some ways to check tensor size in IDE \(post 1: python\)
 ---
 
 If you ever try to play around with one of the tensorflow, pytorch/libtorch you will without any doubt find tracking tensor
