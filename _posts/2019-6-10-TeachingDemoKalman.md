@@ -1,6 +1,6 @@
 ---
 layout: post
-title: A Kalman course demo.
+title: A Kalman filter course demo.
 ---
 
 Please see @ [Teaching Demo](https://github.com/zeta1999/TeachingDemoKalman)
