@@ -41,10 +41,11 @@ class D:
         return "D"
 {% endhighlight %}
 
-So that some tensor can be declared as being of size $ A \mul B $.
+So that some tensor can be declared as being of size $ A \times B $.
 
 {% highlight python %}
-t3: Transition.Tensor2[E, float, A, B] = Transition.ones2(s, float, A(), B())
+t3: Transition.Tensor2[E, float, A, B]
+  = Transition.ones2(s, float, A(), B())
 {% endhighlight %}
 
 Next we will have a look at Ocaml (as there are [Ocaml bidings to LibTorch](https://github.com/LaurentMazare/ocaml-torch) ) and
