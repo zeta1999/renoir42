@@ -1,8 +1,9 @@
 ---
 layout: post
 mathjax: true
-title: Incomplete Post, Some ways to check tensor size in IDE. post 1: python
+title: Incomplete Post, Some ways to check tensor size in IDE
 ---
+Nota bene: tis is only a proof of concept at this stage.
 
 If you ever try to play around with one of the tensorflow, pytorch/libtorch you will without any doubt find tracking tensor
 dimensions a pain in the... neck.
@@ -27,15 +28,20 @@ Let us first define (abstract) dimensions: A,B,C,D.
 
 {% highlight python %}
 class A:
-    pass
+    def __repr__(self) -> str:
+        return "A"
 class B:
-    pass
+    def __repr__(self) -> str:
+        return "B"
 class C:
-    pass
+    def __repr__(self) -> str:
+        return "C"    
 class D:
-    pass
+    def __repr__(self) -> str:
+        return "D"
 {% endhighlight %}
 
 [TBC]
 
-
+Next we will have a look at Ocaml (as there are [Ocaml bidings to LibTorch](https://github.com/LaurentMazare/ocaml-torch) ) and
+C++.
