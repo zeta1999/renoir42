@@ -81,7 +81,7 @@ def example01(s: Transition.Session[E]):
 {% endhighlight %}
 
 Then, when running the source file...
-![Run python](RunPython.png)
+![Run python](https://zeta1999.github.io/renoir42//images/RunPython.png)
 
 Next we will have a look at Ocaml (as there are [Ocaml bidings to LibTorch](https://github.com/LaurentMazare/ocaml-torch) ) and
 C++.
