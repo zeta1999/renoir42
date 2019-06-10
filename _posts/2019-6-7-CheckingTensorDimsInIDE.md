@@ -1,7 +1,7 @@
 ---
 layout: post
 mathjax: true
-title: Some ways to check tensor size in IDE (post #1: python)
+title: (Incomplete Post) Some ways to check tensor size in IDE (post #1: python)
 ---
 
 If you ever try to play around with one of the tensorflow, pytorch/libtorch you will without any doubt find tracking tensor
@@ -22,5 +22,20 @@ Today, let us focus on the [Python case](https://github.com/zeta1999/TensorDimCh
 The trick of the matter is to encode dimensions as a abstract type parameters. Writing code in such a generic way will allow 
 later to add an extra optimization loop for metaparameter tuning: get a model which is as big as needed but not much more, 
 hence allowing for faster inference and re-training.
+
+Let us first define (abstract) dimensions: A,B,C,D.
+
+{% highlight python %}
+class A:
+    pass
+class B:
+    pass
+class C:
+    pass
+class D:
+    pass
+{% endhighlight %}
+
+[TBC]
 
 
