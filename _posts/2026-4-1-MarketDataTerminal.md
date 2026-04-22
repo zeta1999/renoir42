@@ -1,45 +1,59 @@
 ---
 layout: post
-title: "A Market Data Terminal From Scratch"
+title: "notbbg: a market-data terminal across CEX, DEX, macro, and news (updated)"
 ---
 
-[notbbg](https://github.com/zeta1999/this-is-not-bbg-public) is a real-time market data terminal that aggregates feeds from 17+ sources into a single interface. TUI for the terminal, React Native for mobile. The name is a joke, obviously.
+[this-is-not-bbg-public](https://github.com/zeta1999/this-is-not-bbg-public) is a market-data terminal that aggregates ~17 feeds (CEX, DEX, macro, on-chain, news) into a single Go server and three clients. The name is a joke.
 
-## Why Build One
+## Clients
 
-Bloomberg terminals cost $24K/year. For crypto and cross-asset monitoring — where you need CEX feeds, DEX feeds, FX, commodities, news, and on-chain data in one place — there's no single product that does it well. You end up with 15 browser tabs and a Discord window. I wanted one screen.
+Three, not one:
 
-## Architecture
+- **TUI** — Bubble Tea terminal app with seven panels: OHLC charts, LOB, news, alerts, feed monitor, server log, agent.
+- **Desktop** — Electron GUI for the same topics.
+- **Phone** — React Native (Expo) app, marked experimental in the README. QR / manual pairing from TUI or desktop.
 
-The core is a feed aggregation layer with 17 adapters:
+## Feeds
 
-**Exchanges**: Binance, OKX, Bybit, Bitget, Hyperliquid (WebSocket streams for orderbook and trades)
-**Aggregators**: CoinGecko, Yahoo Finance (REST polling for broader market data)
-**News**: 20+ RSS feeds from crypto and financial news sources
-**On-chain**: Block explorers and DeFi protocol APIs
+All adapters live under `server/internal/feeds/`:
 
-Each adapter runs independently and pushes normalized messages into a central event bus. The bus implements credit-based backpressure — inspired by Erlang's GenStage — so a slow consumer (say, the chart renderer) doesn't cause the feed handlers to buffer unboundedly or drop data.
+- `ccxt/`: Binance, OKX, Bybit, Bitget, Coinbase, Kraken.
+- `dex/`: Hyperliquid, Jupiter, Raydium, Uniswap, plus DeFi-protocol HTTP clients.
+- `world/`: CoinGecko, Yahoo Finance, FRED, Fear/Greed index, mempool.space.
+- `rss/`: 20+ news feeds through a single module.
 
-## The Seven Panels
+Each adapter normalizes into topic-tagged bus messages (`ohlc.*.*`, `lob.*.*`, `trade.*.*`, `news`, `perp.*.*`, `indicator.*`).
 
-The TUI interface has seven panels that you can navigate between:
+## Bus and backpressure
 
-1. **OHLC charts** — multi-timeframe candlesticks with basic indicators
-2. **LOB** — live order book depth with bid/ask visualization
-3. **News feed** — aggregated and deduplicated across RSS sources
-4. **Alerts** — configurable price/volume/spread alerts
-5. **Feed monitor** — health status and latency for each adapter
-6. **Server log** — raw event stream for debugging
-7. **AI agent** — embedded Claude terminal for ad-hoc queries against the data
+Two things, in two different places:
 
-## Post-Quantum Encrypted Backup
+- `server/internal/bus/bus.go` — topic pub/sub with per-topic ring buffers so a late-joining subscriber gets history. No credit scheme; overflow drops old entries in the ring.
+- `server/cmd/notbbg-server/relay.go` — per-client relay with credit-based flow control for *bulk* topics (OHLC backfill). Realtime topics bypass credits and send as soon as the client is writable. Credits are refilled by client acks; the design is GenStage-shaped, not a straight port.
 
-The remote collector uses TLS 1.3 with ML-KEM-768 for key exchange. Market data streams to a remote server over this channel, written to a Hive-partitioned JSONL datalake. The encryption is overkill for market data, but the same infrastructure backs up configuration, API keys, and alert rules — where PQ encryption is forward-looking insurance.
+The draft I had before put the credit scheme in the bus. It's in the relay, and it only gates bulk data.
 
-Secrets (API keys, auth tokens) are stored locally encrypted with Argon2id key derivation.
+## PQC layer
 
-## What's Next
+`server/internal/transport/pqc.go` implements an ML-KEM-768 handshake (via Cloudflare's `circl/kem/mlkem/mlkem768`), HKDF into a ChaCha20-Poly1305 session key, running *on top of* TLS 1.3 — not as TLS's own key exchange. The collector push path uses this double layer so a classical TLS break wouldn't immediately expose the replayed stream. Forward-looking rather than strictly necessary for public market data; the same transport backs config + secrets sync.
 
-The terminal feeds directly into [gpu-backtest](https://github.com/zeta1999/gpu-backtest-public), a GPU-accelerated backtesting engine I'm building in parallel. Recent work there includes a Monte Carlo scenario engine for robust meta-parameter optimization, synthetic data generation for reproducible testing, Metal/OpenCL backend parity with CUDA, and a growing library of classical HFT strategies written in a custom DSL. The idea is that notbbg collects and normalizes the data, and gpu-backtest consumes it for strategy development.
+Secrets encryption (`server/internal/config/encrypted.go`): Argon2id → SHA3-256 sequential stretch → XChaCha20-Poly1305. Same shape as [rust-secure-memory](https://github.com/zeta1999/rust-secure-memory-public).
 
-The repo is at [github.com/zeta1999/this-is-not-bbg-public](https://github.com/zeta1999/this-is-not-bbg-public).
+## Datalake
+
+`server/internal/datalake/writer.go` subscribes to configured topic globs and writes Hive-partitioned JSONL under `type/exchange/instrument/date/`. Daily or hourly rotation via config. One file handle per active partition, append-only.
+
+## AI panel
+
+The seventh TUI panel shells out to `claude -p <prompt>` (the Claude Code CLI binary on the machine) with a 60-second timeout — `transport/http.go:handleAgentExec`. It's a thin wrapper, not an embedded LLM.
+
+Shelling out to a code-agent CLI is, in my experience, the part that actually earns its keep for data-science-style use against a live terminal: the agent can read the Hive-partitioned JSONL under the datalake path, write a quick Go or Python script, grep the bus log, or pull a specific topic window on demand — all without the terminal needing to ship a bespoke query language. The same mechanism works with Codex / any agent CLI that respects `-p` semantics; Claude Code is the default because that's what's on my `$PATH`.
+
+## What I'd do next
+
+- Normalize the feed-side backpressure too: right now a misbehaving CCXT connection can fan out to the bus faster than the datalake writer drains. A per-publisher token bucket or ring-rejection counter would at least surface that.
+- Back the ring buffer with a tiered on-disk store for longer replay windows than memory allows.
+- Put a public schema on the bus message payloads (the proto/ dir has some of this already) and use it as a pluggability point for external consumers instead of re-subscribing over HTTP.
+- Windows client: I only run the TUI on Linux/macOS day-to-day.
+
+Code @ [github.com/zeta1999/this-is-not-bbg-public](https://github.com/zeta1999/this-is-not-bbg-public).

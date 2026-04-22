@@ -1,50 +1,52 @@
 ---
 layout: post
-title: "Post-Quantum Key Exchange in Practice: ML-KEM-768"
+title: "ML-KEM-768 in rust-secure-memory: what's wired, what isn't (updated)"
 ---
 
-In a [previous post]({% post_url 2026-3-30-PostQuantumSecureMemory %}) I covered the secure memory side of [rust-secure-memory](https://github.com/zeta1999/rust-secure-memory-public) — guard pages, mlock, zeroization. This post goes deeper into the cryptographic layer: the ML-KEM-768 post-quantum key encapsulation mechanism and how it integrates with XChaCha20-Poly1305 for encrypted memory enclaves.
+Follow-on to the [rust-secure-memory overview]({% post_url 2026-3-30-PostQuantumSecureMemory %}). An earlier draft of this post described the KEM as the mechanism behind Enclave sealing. It isn't. Rewriting against what `kem.rs`, `enclave.rs`, and `crypto.rs` actually do.
 
-## Why Post-Quantum Now
+## What's actually implemented
 
-NIST finalized ML-KEM (formerly CRYSTALS-Kyber) as a standard in 2024. The "harvest now, decrypt later" threat is real — adversaries recording encrypted traffic today can break it once quantum computers reach sufficient scale. For anything that stores long-lived secrets (key material, credentials, session tokens), migrating to PQ crypto is not premature — it's overdue.
+`secure-memory/src/kem.rs` wraps [`ml-kem`](https://crates.io/crates/ml-kem) (FIPS 203 / ML-KEM-768) as a standalone primitive:
 
-## ML-KEM-768: The Basics
+- `KemKeyPair::generate()` — returns a pair where the secret key (2400 bytes) is stored in a `LockedBuffer` and the public key (1184 bytes) is a plain `Vec<u8>`.
+- `encapsulate(public_key)` — returns `(Ciphertext [1088 bytes], SharedSecret [32 bytes in a LockedBuffer])`.
+- `KemKeyPair::decapsulate(ciphertext)` — returns the 32-byte shared secret as a `LockedBuffer`.
 
-ML-KEM is a lattice-based key encapsulation mechanism. The "768" refers to the security parameter — ML-KEM-768 targets roughly 192-bit classical security and 128-bit quantum security.
+Sizes pulled directly from the constants at the top of `kem.rs`: `EK_SIZE = 1184`, `DK_SIZE = 2400`, `CT_SIZE = 1088`, `SS_SIZE = 32`. ML-KEM-768 targets ~192-bit classical / 128-bit quantum security (NIST Category 3).
 
-The protocol is simple:
-1. **KeyGen**: generate a public/private keypair
-2. **Encapsulate**: using the public key, produce a ciphertext and a shared secret
-3. **Decapsulate**: using the private key and the ciphertext, recover the shared secret
+## What the Enclave actually uses
 
-The shared secret is then used as the key for a symmetric cipher — in our case, XChaCha20-Poly1305.
+Here's the important correction. An `Enclave` is not encrypted with a per-seal KEM shared secret. Reading `enclave.rs`:
 
-## The Practical Concerns
+- `Enclave::new(data)` calls `crypto::session_encrypt(data)`.
+- `crypto::session_encrypt` looks up the **per-process session key** — a random 32-byte key lazily initialised in a `LockedBuffer` (`crypto.rs:19-28`).
+- Encryption is XChaCha20-Poly1305 with that session key.
+- `Enclave::open()` does the reverse with `session_decrypt`.
 
-**Key sizes**: ML-KEM-768 public keys are 1,184 bytes, ciphertexts are 1,088 bytes. That's roughly 10x larger than X25519. For network protocols this matters; for encrypting memory enclaves on the same machine, it's irrelevant.
+So Enclave sealing is symmetric-only. ML-KEM is exposed alongside it as a separate primitive, but there is no current code path where an `encapsulate()` result becomes the key to an `Enclave`. The previous draft of this post described that integration in step-by-step detail. It doesn't exist.
 
-**Performance**: encapsulation and decapsulation are fast — sub-millisecond on modern hardware. The bottleneck in rust-secure-memory is never the KEM; it's the symmetric encryption of the enclave contents.
+The practical consequence: Enclaves work *within* a single process (the session key is wiped on `destroy_session_key()` / `purge()`). If you wanted to ship a sealed Enclave to another process and let them unseal it with their own long-lived keypair, you'd need to wire ML-KEM into the sealing path yourself. That wiring is not there today.
 
-**Hybrid approach**: in production, you might want ML-KEM-768 + X25519 in a hybrid construction, so you don't lose security if either scheme is broken. rust-secure-memory currently uses ML-KEM-768 standalone, but the architecture supports pluggable KEM backends.
+## "Pluggable KEM backends" — also not real
 
-## Encrypted Enclaves
+The earlier draft claimed "the architecture supports pluggable KEM backends." Grep for `trait` or `dyn` in `kem.rs` returns nothing. The module hard-wires `MlKem768` from the `ml-kem` crate. A hybrid construction (X25519 ⊕ ML-KEM-768) is something I'd *want* and listed in the previous post's "what I'd add" — it's not something the code currently supports via a swap-in interface.
 
-The flow in rust-secure-memory:
+## Size tradeoff, honestly
 
-1. Allocate a memory region with `mlock` (prevent swapping to disk) and guard pages (detect overflow/underflow)
-2. Generate an ML-KEM-768 keypair
-3. When the enclave is "sealed", encapsulate to produce a shared secret
-4. Encrypt the enclave contents with XChaCha20-Poly1305 using the shared secret
-5. Zeroize the plaintext and the shared secret
-6. To unseal, decapsulate and decrypt
+ML-KEM-768's public key at 1184 bytes and ciphertext at 1088 bytes are roughly 35× the size of X25519's 32-byte public and 32-byte ciphertext, not 10× as the previous draft said. For on-machine use it's irrelevant. For network protocols it's the dominant handshake cost — `notbbg`'s PQC transport layer pays exactly this price on every connection.
 
-The enclave can be sealed and unsealed multiple times. Each seal operation generates a fresh shared secret via a new encapsulation, so there's no key reuse.
+## Verification of the KEM wrapper
 
-## Formal Verification
+- **3 Kani harnesses** in `kem.rs` (lines 235, 244, 253) — bounded checks on input validation for encapsulate/decapsulate. Not "all reachable states" as the previous draft implied; Kani is depth-bounded, and that matters.
+- **`fuzz_kem.rs`** — a `cargo-fuzz` target that feeds arbitrary-length buffers into both `encapsulate` and `decapsulate`, asserting wrong-sized inputs are rejected and that CT_SIZE-byte inputs trigger ML-KEM's implicit-rejection path (a silent different-secret return, per FIPS 203) without panicking.
 
-The KEM integration is covered by Kani harnesses and cargo-fuzz campaigns. The Kani harnesses verify that encapsulate/decapsulate round-trips correctly for all reachable states. cargo-fuzz tests the parsing of malformed ciphertexts and public keys to ensure no panics or memory corruption.
+Neither of these proves anything about ML-KEM's cryptographic soundness — that's a property of the underlying MLWE/MLWR problems, argued in the FIPS 203 standard. They prove that this Rust wrapper rejects malformed inputs and preserves buffer sizing discipline.
 
-This doesn't prove the cryptographic security of ML-KEM itself — that's a mathematical property of the underlying lattice problem. What it proves is that the Rust code correctly implements the protocol and handles edge cases safely.
+## What I'd do next, and honestly
 
-The repo is at [github.com/zeta1999/rust-secure-memory-public](https://github.com/zeta1999/rust-secure-memory-public).
+- Actually wire ML-KEM into Enclave sealing as an *alternative* path: `Enclave::seal_for(public_key)` that encapsulates, derives a symmetric key via HKDF, encrypts under that, stores the ciphertext alongside the KEM ciphertext. Unsealer holds a `KemKeyPair`.
+- Add the hybrid X25519 ⊕ ML-KEM-768 construction before anyone depends on ML-KEM alone for an adversarial setting. The defensive shape is trivial: run both KEMs, concat shared secrets, HKDF into the session key.
+- Extend the Lean 4 proofs in `proofs/lean4/SecureMemory/` with a spec for the seal/unseal composition if the above wiring ships, so the top-level security argument has a machine-checked skeleton rather than just composition lemmas.
+
+Code @ [github.com/zeta1999/rust-secure-memory-public](https://github.com/zeta1999/rust-secure-memory-public).

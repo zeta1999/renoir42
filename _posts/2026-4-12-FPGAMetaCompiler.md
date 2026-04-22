@@ -1,72 +1,71 @@
 ---
 layout: post
-title: "From DSL to Silicon: Building an FPGA Meta-Compiler in Rust"
+title: "Aria-HDL: a single .ahdl source through ten backends (updated, WIP)"
 ---
 
-[fpga-meta-compiler](https://github.com/zeta1999/fpga-meta-compiler-public) is a hardware description language and compiler that generates synthesizable RTL, formal verification proofs, and GPU emulation kernels from a single source. The language is called Aria-HDL, and it shares DNA with the Aria DSL used in [gpu-backtest](https://github.com/zeta1999/gpu-backtest-public) and the Pricer Master derivatives pricing library — the same pipe operator, the same composability principles, but targeting silicon instead of software.
+[fpga-meta-compiler-public](https://github.com/zeta1999/fpga-meta-compiler-public) is an HDL and Rust compiler called Aria-HDL. One `.ahdl` source, ten backends: Verilog, VHDL, Verilator bundle, SymbiYosys/SVA, Lean 4 proof obligations, CUDA, Metal, OpenCL, a JSON resource report, and an IR dump. Marked WIP in the README and here, honestly.
 
-## Why Another HDL
+The name overlap with the [gpu-backtest Aria DSL]({% post_url 2026-4-12-AriaStrategyDSL %}) is the `|>` pipe token and the `let` / `var` binding shape. They're separate compilers with separate frontends; don't read "same language."
 
-Verilog and VHDL are fine for writing hardware, but they give you no help with verification, no path to GPU emulation for fast iteration, and no machine-readable resource estimates. If you want all three, you end up maintaining separate codebases that inevitably drift apart.
+## Backends
 
-Aria-HDL compiles a single `.ahdl` source into 10 different backends:
+From `src/main.rs` CLI flags and the per-backend files in `src/`:
 
-```
-                        +---> Verilog ---> Yosys / Vivado ---> bitstream
-                        +---> VHDL ---> NVC / GHDL ---> simulation
-Aria-HDL source (.ahdl) +---> Verilator bundle ---> C++ co-simulation
-         |              +---> SVA / PSL + .sby ---> SymbiYosys ---> proofs
-         v              +---> Lean 4 ---> proof obligations
-     Compiler IR        +---> CUDA kernel ---> GPU semantic emulation
-         |              +---> Metal shader ---> Apple Silicon emulation
-         |              +---> OpenCL kernel ---> cross-vendor emulation
-         |              +---> JSON resource report ---> design space exploration
-         |
-         +---> Optimization: retiming, C-slowing, CDC enforcement
-```
+| Backend | Flag | File |
+|---|---|---|
+| Verilog | `--emit-verilog` | `verilog.rs` (+ `verilog_lint.rs`) |
+| VHDL | `--emit-vhdl` | `vhdl.rs` |
+| Verilator bundle | `--emit-verilator` | `verilator.rs`, `verilator_driver.rs` |
+| SVA/PSL + SymbiYosys | `--emit-sby` | `formal.rs`, `formal_aware.rs` |
+| Lean 4 | `--emit-lean4` | `lean4.rs` |
+| CUDA | `--emit-cuda` | `gpu.rs` |
+| Metal | `--emit-metal` | `metal.rs` |
+| OpenCL | `--emit-opencl` | `opencl.rs` |
+| Resource report (JSON) | `--resource-report` | `resource.rs` |
+| IR dump | `--emit-ir` | `ir/pretty.rs` |
 
-Write once, verify formally, emulate on GPU, synthesize to FPGA. That's the pitch.
+## DSL surface (verified in `token.rs` / `parser.rs`)
 
-## The Language
+- Hardware primitives: `module`, `pipeline` (with `|>` stage boundaries), `systolic`, `stream<T>`, `fifo<depth=N>`, `approx()`.
+- Types: `int<N>`, `uint<N>`, `fix<W,I>`, `fp32/fp16/bf16/fp8e4m3`, `bits<N>`, `struct`, `enum` (tagged unions), `mx<T,N>` microscaling blocks.
+- Bindings: `let` (combinational) and `var` (register).
+- Inline formal: `assert`, `assume`, `cover`, `always`, `never`, `eventually` are keywords in the token table — not comments or external annotations.
 
-Aria-HDL is declarative — you describe what the hardware does, not how to wire gates. A few key features:
+Most of that compiles through `lowering.rs` into the IR under `src/ir/` (`expr`, `module`, `types`, `formal`) before any backend sees it.
 
-- **`let` / `var`**: immutable bindings for combinational logic, `var` for registers (state)
-- **Pipe operator (`|>`)**: natural left-to-right dataflow for pipelines
-- **Rich type system**: arbitrary-width integers (`int<N>`, `uint<N>`), fixed-point (`fix<W,I>`), IEEE floats (fp32 down to fp8), microscaling blocks (`mx<T,N>`), structs, tagged unions
-- **Hardware primitives**: `module`, `pipeline` with stage boundaries, `systolic` arrays with PE grids, `stream<T>` with flow control, `fifo<depth=N>` with CDC support
-- **Inline formal verification**: `assert`, `assume`, `cover`, `always`, `never`, `eventually` as first-class constructs — not bolted on after the fact
+## Passes
 
-## Formal Verification
+Under `src/passes/`:
 
-This is where it gets interesting. The compiler emits two kinds of verification output:
+- `retiming.rs` — move registers across combinational logic to balance stages. The scaffolding for Leiserson-Saxe is in `leiserson_saxe.rs` but most pass calls go through the plainer retiming for now.
+- `c_slow.rs` — trade latency for throughput by stage insertion.
+- `cdc.rs` — clock-domain-crossing enforcement. This one actually returns a hard `Err` (see `cdc.rs:102`, "errors" vector pushed and surfaced) rather than a warning; unregistered crossings fail the compile.
+- `balance.rs` — equalise latency across pipeline paths.
 
-1. **SVA/PSL assertions** with SymbiYosys configuration files — bounded model checking of the synthesizable RTL
-2. **Lean 4 proof obligations** — type-checked proof skeletons with struct and enum definitions matching the hardware types
+## Examples that currently parse and emit
 
-The formal backend isn't an afterthought. CDC (clock domain crossing) violations are hard errors — the compiler refuses to emit RTL if you have an unregistered clock domain crossing. Pipeline latency mismatches are caught at compile time.
+`examples/` contains: `alu.ahdl`, `blinker.ahdl`, `constrained_mac.ahdl`, `cpu8051.ahdl`, `crypto.ahdl`, `dnn_inference.ahdl`, `dsl_showcase.ahdl`, `pcie_mac.ahdl`, `pipeline_demo.ahdl`, `resource_demo.ahdl`, `sigmoid_lut.ahdl`, `tcp_ip.ahdl`, plus `ecp5_85k.arsc` (device resource file) and an ONNX-text MNIST classifier used by `onnx_import.rs`. So the use-case families — systolic MAC, networking offload, small CPU core, activation LUT, crypto unit, ONNX import — have at least one worked example each.
 
-## GPU Emulation
+## GPU semantic emulation, honestly
 
-Before committing to a synthesis run (which can take hours on a complex design), you can emulate the design semantically on CUDA, Metal, or OpenCL. The GPU kernels mirror the hardware behavior cycle-by-cycle, so you can validate functional correctness at GPU speed rather than RTL simulation speed.
+The CUDA / Metal / OpenCL emitters are faster-than-RTL functional emulation of the compiled IR. It's not a cycle-accurate replacement for Verilator — it's a "does the semantics still do what I meant" check before you start a multi-hour Yosys or Vivado run. Useful for design-space sweeps (e.g. varying a PE grid) where you're burning iterations on the wrong thing.
 
-This is particularly useful for systolic array designs (DNN inference, matrix multiply) where the design space is large and you want to sweep parameters before committing to a bitstream.
+## What's real vs thin vs aspirational — being honest
 
-## Compiler Passes
+The repo is WIP and so are several of the features. Ranking roughly by maturity:
 
-The compiler IR goes through several optimization passes:
-- **Retiming**: move registers across combinational logic to balance pipeline stages
-- **C-slowing**: trade latency for throughput by inserting pipeline stages
-- **CDC enforcement**: hard error on unregistered domain crossings
-- **Pipeline balancing**: ensure all pipeline paths have equal latency
-- **Resource estimation**: JSON output with LUT/register/DSP/BRAM counts and Pareto-optimal alternatives for `approx()` blocks
+- **Solid**: frontend (lexer, parser, typecheck, lowering), the IR under `src/ir/`, the CDC pass returning real `Err`, the example `.ahdl` files parsing and type-checking.
+- **Working but not tooling-validated**: the Verilog and VHDL emitters produce output, and the Verilator bundle wires up a build flow — but I have **not** driven an example all the way through Yosys / Vivado / NVC to a bitstream or a finished sim run, so "synthesizable" is a claim about shape, not a claim I've watched a toolchain accept.
+- **Thin**: `formal.rs` is a light SVA/PSL + SymbiYosys scaffold, not a fleshed-out proof backend. The Lean 4 emitter produces type and obligation skeletons; closed proofs are not shipped. The default retiming pass is the plain one; the Leiserson-Saxe implementation is in the tree but not on the default path.
+- **Aspirational / skeletal**: `pcie_emu.rs`, `host_cosim.rs`, and the ONNX import path (which covers a partial op subset via a hand-written protobuf reader and a companion textual format) are starting points, not production pipelines. Don't read them as working end-to-end.
 
-## Use Cases
+The resource-report JSON (`resource.rs`) is the one feature I'd describe as "substantial and probably accurate for the design shapes currently exercised" — LUT/register/DSP/BRAM estimates plus an approx-unit Pareto front. But I haven't cross-checked its numbers against a real Vivado `report_utilization` output for the same module, so treat the figures as self-consistent rather than vendor-validated.
 
-The examples in the repo cover:
-- **Systolic arrays** for DNN inference (INT8 MACs)
-- **Cryptographic accelerators** (modular arithmetic with formal proofs)
-- **Networking offload** (TCP checksum with state machines)
-- **Activation functions** (piecewise linear approximation via `approx()`)
+## What I'd do next
 
-The repo is at [github.com/zeta1999/fpga-meta-compiler-public](https://github.com/zeta1999/fpga-meta-compiler-public). Still WIP but the core pipeline works end-to-end.
+- Drive one example all the way: `.ahdl` → Verilog → Yosys → bitstream on an ECP5, with a Verilator co-sim parity test in CI. That's the first honest "end-to-end" claim. Today the compiler emits all ten outputs but I haven't pinned a full toolchain journey.
+- Promote a Lean 4 emitted obligation into a closed proof for one non-trivial module (e.g. the systolic MAC from `constrained_mac.ahdl`), to demonstrate the backend does more than scaffold types.
+- Replace the default retimer with Leiserson-Saxe properly and benchmark against the current pass on the DNN example.
+- Add a GPU-vs-Verilator parity test on `sigmoid_lut.ahdl` so the "semantic emulation" claim has teeth.
+
+Code @ [github.com/zeta1999/fpga-meta-compiler-public](https://github.com/zeta1999/fpga-meta-compiler-public).

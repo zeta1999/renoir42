@@ -1,70 +1,72 @@
 ---
 layout: post
-title: "Seal DAO Architecture: Building a Post-Quantum L1 from Scratch (WIP)"
+title: "Seal DAO architecture: what the 17 crates actually do today (updated, WIP)"
 ---
 
-In a [previous post]({% post_url 2026-4-5-FormalVerificationBlockchain %}) I covered the formal verification approach for [Seal DAO](https://github.com/SealProjectDAO/seal-dao-public). This post is about the architecture itself — why we made the design choices we did, and what building an L1 blockchain from scratch in Rust actually involves.
+Companion to the [Seal DAO formal-verification post]({% post_url 2026-4-5-FormalVerificationBlockchain %}). That one covered the `formal/` tree. This one covers the `crates/` tree — which parts are wired up, which parts are placeholders with a TODO header, and which parts are honestly aspirational. The earlier draft of this post inflated a few of those categories; rewriting against the code.
 
-## Why From Scratch
+## 17 crates, roughly by maturity
 
-The standard approach to building a blockchain is to fork an existing one — fork Ethereum, fork Cosmos SDK, fork Substrate. You get consensus, networking, storage, and an ecosystem for free. The trade-offs: you inherit their design decisions, their technical debt, and their security assumptions.
+From `crates/` (alphabetised): `seal-app`, `seal-bridge`, `seal-cli`, `seal-consensus`, `seal-crypto`, `seal-merkle`, `seal-mpc`, `seal-node`, `seal-p2p`, `seal-sql`, `seal-storage`, `seal-tee`, `seal-threshold`, `seal-token`, `seal-vrf`, `seal-wallet`, `seal-zk`.
 
-We wanted three things that existing L1s don't provide together:
-1. **Post-quantum cryptography from day one** — not bolted on later
-2. **A native SQL database** — not key-value storage with SQL layered on top
-3. **Formal verification** of the consensus and state machine — not just tests
+The Rust under `crates/` (excluding vendored deps and `target/`) is about 45K lines, not the 2.1M figure the earlier draft quoted — that was counting the vendor tree.
 
-So we built from scratch. 2.14 million lines of Rust, 17-crate workspace, 804 tests.
+Tests: 816 `#[test]` / `#[tokio::test]` entries across the workspace. The "804" in the earlier draft was approximately right.
 
-## Consensus: Algorand VRF
+## Consensus: not Algorand
 
-Seal DAO uses a consensus protocol based on Algorand's Verifiable Random Function (VRF). The VRF provides cryptographic sortition — each node can privately determine whether it's been selected to propose or vote in a given round, without revealing this to other nodes until it acts. This gives us:
+The earlier draft said "Algorand VRF." That's wrong and it's the second time this particular claim has crept in. From `seal-vrf/src/lib.rs`, verbatim:
 
-- **Byzantine fault tolerance** up to 1/3 malicious stake
-- **Fast finality** — blocks are final once committed, no rollbacks
-- **Energy efficiency** — no proof-of-work
+- `HmacVrf` — "HMAC-SHA3 stub (NOT PQ, for testing only)".
+- `PqVrf` — "ML-DSA + SHA3 construction (PQ-secure, practical). **Use `PqVrf` for production.**"
+- `LatticeVrf` — "LB-VRF placeholder (Module-LWE/SIS, future)".
+- `LavVrf` — the Lattice-based many-time VRF referenced in the Lean formal work.
 
-The VRF keys are post-quantum (ML-DSA-65), so the sortition is secure against quantum adversaries. This was a key design requirement — if the VRF can be forged, an attacker can predict and control block production.
+So production sortition is ML-DSA + SHA3, with a ~3.3 KB proof (one ML-DSA-65 signature). No EC-VRF anywhere in the stack.
 
-## Native SQL Database
+The committee voting layer on top uses a 2/3 threshold. `SealConsensus.tla` proves Agreement, NoEquivocation, MonotonicHeight, and Progress on that shape.
 
-Most blockchains store state in a Merkle trie backed by LevelDB or RocksDB — essentially a key-value store. This works for simple token balances but makes complex queries expensive. Want to find all accounts with balance > X that interacted with contract Y in the last N blocks? That's a full state scan.
+## Threshold signatures: current is placeholder, real one is future
 
-Seal DAO stores chain state in a native SQL database. Blocks, transactions, accounts, and contract state are all queryable via SQL. The 27 RPC methods expose this directly — you can run analytical queries against the live chain state without an external indexer.
+`seal-threshold/src/lib.rs` is explicit about this, and I'm going to quote it because the earlier draft of this post was not:
 
-The trade-off is complexity. Maintaining SQL consistency across consensus rounds — where a block might be proposed, partially applied, and then rolled back — requires careful transaction management. The state database uses write-ahead logging with savepoints that align with consensus rounds.
+> `SimpleThreshold` (current) — Collects individual ML-DSA signatures and a participation bitfield. **NOT a real threshold scheme (signatures are not aggregated).** Used for protocol development.
+>
+> `RingtailThreshold` (future, TODO) — Ringtail lattice-based threshold signatures (ePrint 2024/1113). 2-round interactive protocol producing a single ~13.4 KB signature from 100 committee members.
 
-## On-Chain DEX
+So: "MPC-aggregated threshold signatures at the bridge" is what the design points at. What's actually running today is "collect individual signatures + bitfield, verify each." The checklist on `RingtailThreshold` in the source file lists porting the reference implementation, wiring round-1 preprocessing, Lean 4 proof of security properties, Kani/Miri/fuzz verification, and a 100-member WAN signing benchmark as still-to-do.
 
-The on-chain decentralized exchange is built into the L1, not deployed as a smart contract. This means order matching runs at consensus speed with no gas overhead. The DEX supports limit orders, market orders, and an AMM pool for liquidity bootstrapping.
+## Native SQL, with proofs at the operation layer
 
-Having the DEX at the protocol level also means the consensus can enforce ordering fairness — the current implementation uses a batch auction mechanism that prevents frontrunning by committing all orders in a round before matching.
+`seal-sql/` is real and the Rocq modules in the companion post prove the state-operation semantics (`SqlState.v`: `insert_lookup`, `insert_duplicate_fails`, `update_preserves_count`, `delete_missing_fails`, `sql_ops_deterministic`). Row-level security policy composition is in `RLS.v` (`default_deny`, `non_bypassable_pair`, `adding_policy_restricts`).
 
-## Multi-Chain Bridges
+The tradeoff the earlier draft mentioned is real: keeping the SQL state consistent with consensus rounds needs careful transaction semantics. I called this "fast finality, no rollbacks" and then two paragraphs later described rollbacks — that was a contradiction. What's actually true: the state layer uses WAL-style savepoints aligned with consensus rounds so that a proposed-but-not-committed block can be reverted cheaply. Once a block commits, it is final.
 
-Seal DAO bridges to Solana and Stellar. The bridge design uses MPC (multi-party computation) aggregation — a committee of bridge validators collectively signs cross-chain messages without any single validator holding the full signing key.
+## DEX: batch auction, real
 
-The MPC protocol is post-quantum (ML-DSA-65 threshold signatures), which means the bridge security doesn't degrade when quantum computers arrive. This is important because bridges are the highest-value attack target in cross-chain infrastructure — a compromised bridge key means unlimited minting on the target chain.
+One of the parts that checks out cleanly. `seal-token/src/orderbook.rs:1` opens with "On-chain order book DEX with per-block batch auction matching" using price-time priority: all orders submitted during a block interval are matched at block-production time. Lean proofs in `DEX.lean` cover `conservation_of_quantity`, `trade_price_bounded`, `no_trade_when_no_crossing`, `partial_fill_nonneg`, `time_priority`, `matching_reduces_orders`.
 
-## Wallet Suite
+## Bridges: scaffolded to two chains
 
-The wallet comes in three variants:
-- **TUI** — terminal-based wallet for power users and server environments
-- **Electron/WASM** — desktop wallet with a web-based UI
-- **Android** — mobile wallet via JNI bindings to the Rust core
+`bridges/solana/` and `bridges/stellar/` exist. `SealBridge.tla` proves the accounting invariants (`MintedLeqLocked`, `NoDoubleMint`, `NoMintWithoutLock`, `BurnedLeqMinted`) that map to `bridge.rs` in-code checks. What I would **not** claim is that either bridge is production-validated end-to-end against a live Solana or Stellar validator; the TLA+ side is proved, the Rust side has Kani harnesses on the invariants, but I haven't watched a cross-chain asset move and arrive in an independent explorer.
 
-All three share the same Rust cryptographic core — key generation (ML-DSA-65), transaction signing, BIP-39 mnemonic management. The UI layer is different; the crypto never leaves Rust.
+## Wallet
 
-## The 17-Crate Workspace
+Three client shapes under `apps/`:
 
-The codebase is split into 17 crates for modularity and compile-time isolation:
+- `seal-cli` — terminal / server-side driver. This is what the earlier draft meant by "TUI."
+- `apps/seal-wallet/` — Electron shell over WASM-compiled Rust core, with Tauri also wired.
+- `apps/seal-wallet-android/` — JNI bindings over the same Rust core.
 
-The separation means you can build and test the consensus layer without pulling in the DEX, or work on the wallet without compiling the full node. CI runs all 804 tests across the full workspace.
+Same cryptographic core (ML-DSA-65, BIP-39) behind all three. The UI layer differs; the crypto stays in Rust.
 
-## What We'd Do Differently
+## What I'd actually change next
 
-**Start with the bridge, not the consensus.** The consensus layer took the longest to build and verify, but the bridge is what creates value — it connects your chain to the rest of the ecosystem. If I did it again, I'd build a bridge-first architecture where the L1 consensus is simpler and the bridge is the primary engineering investment.
+Dropping the "start with the bridge, not the consensus" framing from the previous draft — that's revisionist and not a defensible lesson given the bridge itself is currently more scaffold than live infrastructure. Concrete next steps, grounded in TODOs already in the source:
 
-**More property-based testing earlier.** We added Kani harnesses and TLA+ models midway through development. Some of the bugs they caught would have been easier to fix if caught during initial design.
+- Land `RingtailThreshold` as the real threshold backend, following the checklist in `seal-threshold/src/lib.rs` (port → wire preprocessing → Lean proof → benchmarks).
+- Extend Aeneas extraction (currently targeting `seal-merkle`, per the formal post) to `seal-storage` and at least one consensus path, so the Lean proofs are about MIR-extracted definitions rather than hand-written models.
+- Drive one full bridged-asset roundtrip (Seal ↔ Solana) end-to-end in a dev environment with observability on both sides, before claiming the bridge "works."
+- Take Miri off the soft-skip path in `scripts/ci-formal.sh` for the crypto crates.
 
-The repo is at [github.com/SealProjectDAO/seal-dao-public](https://github.com/SealProjectDAO/seal-dao-public).
+Code @ [github.com/SealProjectDAO/seal-dao-public](https://github.com/SealProjectDAO/seal-dao-public).

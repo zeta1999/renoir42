@@ -1,65 +1,76 @@
 ---
 layout: post
-title: "Formal Verification for a Blockchain: Kani, Lean 4, and Rocq"
+title: "Formal verification on Seal DAO: TLA+, Lean 4 + Aeneas, Rocq, Kani (updated)"
 ---
 
-[Seal DAO](https://github.com/SealProjectDAO/seal-dao-public) is a post-quantum blockchain with a native SQL database, built in Rust. One of the things we invested heavily in was formal verification — using multiple tools at different abstraction levels to build confidence that the protocol is correct.
+[Seal DAO](https://github.com/SealProjectDAO/seal-dao-public) is a post-quantum L1 in Rust with on-chain SQL. The `formal/` tree pulls five tool families against different layers. This post is about that tree, not the chain.
 
-This post covers the verification approach, not the blockchain design itself.
+## What's actually there
 
-## Why Multiple Tools
+Counted against the current `formal/` directory:
 
-No single verification tool covers everything. They operate at different levels of abstraction and catch different classes of bugs:
+- **TLA+** — 3 specs + 2 model-check drivers (5 `.tla` files total).
+- **Lean 4** — `SealVerify/` with Aeneas extraction wiring plus hand-written proofs for Hash, MerkleTree, VRF (LaV), and DEX matching. 29 theorems/lemmas.
+- **Rocq** — `seal_verify/` with Balance, StateMachine, SqlState, RLS. 29 theorems/lemmas.
+- **Kani** — 66 `#[kani::proof]` harnesses across 19 files under `crates/seal-{token,consensus,merkle,crypto,threshold,node,bridge}/`.
+- **Miri** — wired into `scripts/ci-formal.sh`; runs if the nightly Miri component is installed, else skipped gracefully.
+- **cargo-fuzz** — 9 targets under `fuzz/fuzz_targets/`.
 
-- **TLA+** works at the protocol/algorithm level. You model the system as a state machine and check invariants across all reachable states. Good for consensus, leader election, message ordering — the distributed systems properties.
-- **Lean 4** is a proof assistant. You write mathematical proofs that certain properties hold. Good for core data structure invariants (Merkle tree correctness, VRF output distribution).
-- **Rocq/Coq** — same category as Lean 4, used for token conservation proofs and the reward/slashing logic.
-- **Kani** is a bounded model checker for Rust. It takes your actual Rust source code and checks assertions up to a bounded depth. Good for implementation bugs — off-by-one errors, integer overflows, panic paths.
-- **Miri** — Rust's undefined behavior detector. Catches memory safety violations that safe Rust prevents but unsafe blocks can introduce.
-- **cargo-fuzz** — coverage-guided fuzzing for the serialization, networking, and crypto layers.
+## TLA+
 
-## What We Verified
+Two specs do the heavy lifting, plus a composite:
 
-### Protocol Level (TLA+)
+- `SealConsensus.tla` — 2/3-threshold committee voting. Proves Agreement (no two honest nodes finalize conflicting blocks), NoEquivocation, MonotonicHeight, and Progress (liveness). SQL execution is explicitly called out as orthogonal to consensus in the spec header; the TLA+ doesn't model SQL isolation.
+- `SealBridge.tla` — lock/mint/burn bridge invariants: `MintedLeqLocked`, `NoDoubleMint`, `NoMintWithoutLock`, `BurnedLeqMinted`. Each one maps to a concrete check in `bridge.rs` via a comment header. This is the part I'd point a bridge reviewer at first.
+- `SealCompositeProof.tla` — composition of the two.
 
-6 TLA+ models covering:
-- **Consensus safety**: No two honest nodes finalize conflicting blocks
-- **Liveness**: If enough nodes are honest, new blocks are eventually finalized
-- **VRF committee selection**: The sortition process selects committees with the expected size distribution
-- **SQL transaction isolation**: Concurrent SQL transactions on-chain don't produce anomalies
+## Lean 4 with Aeneas
 
-### Mathematical Properties (Lean 4, Rocq)
+The most interesting thing on the Lean side isn't a theorem, it's the plumbing. `formal/lean/SealVerify/Aeneas.lean` sets up a [charon](https://github.com/AeneasVerif/charon) → [aeneas](https://github.com/AeneasVerif/aeneas) pipeline that extracts Rust MIR for `seal-merkle` into Lean 4 definitions, so the proofs are about a model generated from the real code rather than a hand-written re-implementation that can drift. Hand-written proofs then compose on top.
 
-- **Merkle tree correctness**: Inclusion proofs are sound and complete
-- **VRF output distribution**: The Algorand VRF produces uniformly distributed outputs
-- **Token conservation**: The total token supply is invariant under all state transitions (Rocq)
-- **Reward/slashing**: Validator rewards and slashing penalties are correctly computed and bounded (Rocq)
+What actually gets proved:
 
-### Implementation (Kani)
+- **MerkleTree.lean** — `insert_lookup`, `insert_lookup_other`, `rootHash_deterministic`, `rootHash_injective`, `delete_lookup`, `delete_idempotent`, `delete_then_insert`, `delete_changes_root`. This is what I'd frame as "Merkle operations preserve the map abstraction and the root hash is a function of the contents," not "inclusion proofs are sound and complete" — that latter phrasing was in the earlier draft of this post and is tighter than what's proved.
+- **VRF.lean** — `LaV.uniqueness`, `LaV.eval_deterministic`, `LaV.satisfies_uniqueness`, `election_integrity`. The VRF is LaV (Lattice-based many-time VRF), a post-quantum construction. It is not the Algorand VRF.
+- **Hash.lean** — injectivity and incremental hashing correctness.
+- **DEX.lean** — on-chain matching: `conservation_of_quantity`, `trade_price_bounded`, `no_trade_when_no_crossing`, `partial_fill_nonneg`, `time_priority`, `matching_reduces_orders`.
 
-16 Kani harnesses covering:
-- Serialization round-trips (encode then decode equals original)
-- Integer arithmetic in fee calculation (no overflow)
-- State transition function edge cases
-- SQL query planner correctness for simple queries
+## Rocq
 
-### Fuzzing (cargo-fuzz)
+Four modules, all under `seal_verify/`:
 
-9 fuzz targets on:
-- Network message parsing (malformed packets)
-- SQL parser (adversarial queries)
-- Crypto primitives (malformed keys, signatures)
-- RPC API inputs
+- **Balance.v** — token arithmetic. `credit_debit_roundtrip`, `transfer_conserves`, `stake_unstake_roundtrip`, and the supporting well-formedness lemmas.
+- **StateMachine.v** — chain transition function. `transition_deterministic`, `transfer_conserves_pair`, `invalid_transfer_no_change`, `mint_increases_supply`, `burn_decreases_supply`.
+- **SqlState.v** — on-chain SQL operations on the state KV: `insert_increases_count`, `insert_lookup`, `insert_duplicate_fails`, `update_preserves_count`, `delete_missing_fails`, `sql_ops_deterministic`.
+- **RLS.v** — row-level-security policy composition: `default_deny`, `policy_deterministic`, `adding_policy_restricts`, `non_bypassable_single`, `non_bypassable_pair`, `policy_commutative_pair`, `single_deny_blocks`.
 
-## What Formal Verification Doesn't Catch
+Reward/slashing isn't in Rocq; it's covered at the implementation level by Kani harnesses in `seal-consensus/src/slashing.rs`.
 
-It's worth being honest about the limits:
+## Kani at implementation level
 
-- **TLA+ models an abstraction**, not the code. A bug in the translation from spec to implementation won't be caught.
-- **Kani is bounded** — it checks up to N steps. A bug at step N+1 is invisible.
-- **Neither tool reasons about performance** — a correct but slow consensus implementation is still a DoS vector.
-- **The specification itself might be wrong** — verification proves that the code matches the spec, not that the spec captures what you actually want.
+Where the 66 harnesses live, grouped:
 
-The combination of tools at multiple abstraction levels mitigates these gaps. TLA+ catches algorithm bugs that Kani's bounded depth would miss. Kani catches implementation bugs that TLA+'s abstraction would miss. Fuzzing catches the weird inputs that nobody thought to model.
+- `seal-token/` — balance, emission, orderbook, params, treasury (the density is highest here).
+- `seal-consensus/` — config, genesis, slashing, validator.
+- `seal-merkle/`, `seal-crypto/`, `seal-threshold/` (NTT, Ringtail), `seal-node/` (committee, delegation, fees, governance), `seal-bridge/`.
 
-The repo is at [github.com/SealProjectDAO/seal-dao-public](https://github.com/SealProjectDAO/seal-dao-public).
+## Fuzzing
+
+9 targets: `fuzz_address_parse`, `fuzz_block_deserialize`, `fuzz_committee_vote`, `fuzz_merkle_ops`, `fuzz_pqvrf_verify`, `fuzz_ringtail_verify`, `fuzz_sql_parser`, `fuzz_tx_deserialize`, `fuzz_vrf_verify`. Corpus and artifacts are checked in.
+
+## What this doesn't get you
+
+- **TLA+ is an abstraction.** A gap between the spec and the Rust is not caught by TLA+. The Aeneas pipeline closes that for `seal-merkle` by generating the Lean model from MIR; other crates are still at the hand-written level.
+- **Kani is bounded.** Harnesses check up to a configured depth; deeper interleavings are out of reach.
+- **Performance isn't a property.** Correct but slow consensus is still a DoS vector.
+- **The spec can be wrong.** A false conclusion from a mis-stated invariant is worse than no proof, because it's load-bearing.
+- **Miri is opt-in** in the CI script — if a contributor runs without the nightly Miri component installed, the step is skipped rather than failing. Worth knowing before assuming it catches every UB on every PR.
+
+## What I'd add next
+
+- Extend the Aeneas extraction beyond `seal-merkle` — the storage and consensus crates are the next candidates.
+- Actually formalise sortition distribution, which is currently claimed at the README level but not modelled. A probabilistic TLA+ or a separate Lean probability sketch would both be reasonable shapes.
+- A TLA+ model for SQL transaction isolation on top of consensus, rather than leaving the two layers disjoint.
+- Make Miri a hard CI requirement on the crypto crates, not a soft skip.
+
+Code @ [github.com/SealProjectDAO/seal-dao-public](https://github.com/SealProjectDAO/seal-dao-public).

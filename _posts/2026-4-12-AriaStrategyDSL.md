@@ -1,60 +1,68 @@
 ---
 layout: post
-title: "Designing a Strategy DSL: the Aria Language in gpu-backtest"
+title: "Aria: a strategy DSL that compiles for CPU and GPU from the same bytecode (updated)"
 ---
 
-In a [previous post]({% post_url 2026-3-25-LOBReconstructionGPU %}) I covered the LOB reconstruction side of [gpu-backtest](https://github.com/zeta1999/gpu-backtest-public). This post is about the other half — the Aria strategy language and why I built a bytecode compiler for it.
+Follow-on to the [gpu-backtest LOB post]({% post_url 2026-3-25-LOBReconstructionGPU %}). This one is about the DSL side — `bt-dsl`, with Aria programs compiled to a bytecode that the same VM runs on CPU, CUDA, OpenCL, and Metal.
 
-## The Problem With Hardcoded Strategies
+## Why a DSL and not a Rust callback
 
-Most backtesting engines make you write strategies in the host language (Python, C++, Rust). This means every strategy variant requires a recompile. If you want to sweep 10,000 parameter combinations across 5 strategy variants with walk-forward optimization, you're recompiling 50,000 times. That's not practical.
+The real reason is the GPU. A parameter sweep with 10K combinations wants 10K independent strategy executions in parallel. You can't run a Rust closure on a CUDA/Metal shader. You can run a fixed-size instruction dispatch loop over `Vec<Instruction>` with per-scenario register overrides, which is what the VM does.
 
-The alternative is an interpreted DSL, but interpretation is too slow for GPU execution and adds unpredictable latency on the hot path.
+A secondary reason is iteration speed — strategies are data files you swap in and out, not Rust code you recompile. But the parameter-sweep framing I used in an earlier draft was a strawman: sweeping a parameter does *not* recompile a host-language backtest either; it just calls the same function with a different argument. The real gain is running the sweep on a GPU, and for that you need a shader-executable representation.
 
-Aria splits the difference: a compiled DSL that produces bytecode, executed by a register-based virtual machine that runs identically on CPU, CUDA, OpenCL, and Metal.
+## What Aria actually looks like
 
-## The Language
-
-Aria is small by design. A momentum strategy looks like:
+From `strategies/momentum.aria` in the repo:
 
 ```
-let fast = sma(close, 10)
-let slow = sma(close, 50)
+signal sma_fast = sma(close, 10)
+signal sma_slow = sma(close, 50)
+signal trend_up   = cross_up(sma_fast, sma_slow)
+signal trend_down = cross_down(sma_fast, sma_slow)
 
-if cross_up(fast, slow) then buy(1.0)
-if cross_down(fast, slow) then sell(1.0)
+let position_size = 1.0
+
+strategy momentum_crossover {
+    when trend_up   -> buy(position_size)
+    when trend_down -> sell(position_size)
+}
 ```
 
-Built-in functions: `sma`, `ema`, `cross_up`, `cross_down`, `run_max`, `run_min`, `stdev`, `zscore`, `percentile`. Order actions: `buy(qty)`, `sell(qty)`, `flatten()`, `limit_buy()`, `limit_sell()`, `vwap()`. The pipe operator (`|>`) composes transformations left-to-right. Variables are mutable with assignment semantics for state across ticks.
+`signal` is a reactive binding that gets recomputed each tick. `let` is a compile-time constant. `var x = 0.0` plus `x := x + 1.0` gives you mutable state across ticks. The `when cond -> action` arm is the only control construct; there's no `if`/`then`/`else`. That keeps the compiled program a straight line of conditional emits, which maps cleanly onto branchless GPU code.
 
-## The Compiler
+## Built-ins
 
-The compilation pipeline:
+From `bt-dsl/src/bytecode.rs`:
 
-1. **Lexer** — tokenizes Aria source
-2. **Parser** — produces an AST
-3. **Compiler** — emits a 44-opcode bytecode program
+- Temporal / rolling: `sma`, `ema`, `run_max`, `run_min`, `cross_up`, `cross_down`, `prev`.
+- Statistical: `stdev`, `zscore`, `percentile`, `linreg_slope`, `hurst_exponent`.
+- Scalar math: `abs`, `max`, `min`, `exp`, `log`.
+- Order actions: `buy`, `sell`, `flatten`, `limit_buy`, `limit_sell`, `vwap`.
 
-The 44 opcodes cover arithmetic, comparison, logical operators, built-in function calls, order actions, control flow, and state management. The bytecode is compact — a typical strategy compiles in microseconds.
+The pipe operator `|>` is lexed but is syntactic sugar for left-to-right composition; it doesn't introduce any new semantics.
 
-## The VM
+## Compiler and bytecode
 
-The register machine executes bytecode against live LOB state. Each tick, the VM receives the current book snapshot (bid/ask/mid/spread/volume) and evaluates the strategy program. If the program emits an order action, it's passed to the OMS (order management system) for simulated execution against the reconstructed order book.
+Pipeline under `bt-dsl/src/`: `lexer.rs` → `parser.rs` → `ast.rs` → `compiler.rs` → `bytecode.rs`. Output is a `CompiledProgram` with a `Vec<Instruction>`, a constants pool, and register/state slot counts. Each instruction is 10 bytes, `#[repr(C)]` for direct GPU upload.
 
-The same VM code compiles for CPU (native Rust), CUDA, OpenCL, and Metal. On GPU, each thread runs an independent VM instance with different parameters — this is how you parallelize parameter sweeps. A grid search across 10,000 parameter combinations runs as 10,000 concurrent VM instances on the GPU.
+The `Opcode` enum has 46 distinct variants grouped as: data loading (8), arithmetic (11), comparison (6), logic (3), branchless `Select` (1), temporal (6), order emission (5), statistical (5), and `Halt`. The repo README says "44 opcodes" — that figure predates `LinRegSlope` and `HurstExponent` being added; take the count from the enum, not the README.
 
-## Why Bytecode Instead of Interpretation
+One detail worth calling out: `vwap(qty, duration)` is parsed and type-checked like any other order action, but `compiler.rs:180` lowers it to a plain `EmitBuy`. The bytecode VM is not responsible for time-slicing; the OMS in `bt-oms` does the VWAP scheduling using the duration as a target horizon. At the VM level, VWAP is a buy.
 
-Three reasons:
+Compilation is fast enough to be a non-issue: `compile_full_strategy` runs in 6.1 μs in `cargo bench` (Apple M4). If you wanted to JIT a new program per walk-forward window, you could.
 
-1. **GPU compatibility**: you can't interpret on a GPU shader. Bytecode maps directly to a fixed instruction dispatch loop that GPU compilers can optimize.
-2. **Determinism**: the VM executes the same number of instructions for the same input regardless of platform. No JIT warmup, no branch prediction variation.
-3. **Compilation speed**: 164K programs/sec on an M4. Cheap enough that Bayesian optimization can recompile strategies on every iteration.
+## VM
 
-## Walk-Forward Optimization
+`vm_cpu.rs` for the CPU path (native Rust, straight instruction dispatch loop). `vm_gpu.rs` marshals the same `CompiledProgram` into a buffer that CUDA / OpenCL / Metal kernels (`gpu/src/{cuda,opencl,metal}/vm_kernel.*`) execute per thread.
 
-The optimizer supports grid search, random search, and Bayesian parameter optimization with walk-forward validation. Each scenario runs the full pipeline: data loading, LOB reconstruction, strategy execution, PnL computation. Results are reduced on GPU (Sharpe ratio, max drawdown, total PnL) and collected on the host.
+For parameter sweeps, `bt-optimizer/src/batch.rs` packs N parameter sets as a flat SoA buffer indexed `overrides[param_idx * num_scenarios + scenario_idx]`. Each GPU thread reads its scenario's overrides into the VM's input registers before the dispatch loop starts. One bytecode program, N parameter vectors, no recompilation.
 
-The Aria DSL makes this practical because strategy variants are data (bytecode programs), not code (compiled binaries). The optimizer generates, compiles, and evaluates thousands of variants without touching the Rust build system.
+## What I'd do next
 
-The repo is at [github.com/zeta1999/gpu-backtest-public](https://github.com/zeta1999/gpu-backtest-public).
+- A small type-checker pass between parser and compiler. Today you can write `stdev(cross_up(...), 20)` and get a compiled program that produces nonsense; the compiler doesn't distinguish series-valued from boolean-valued signals.
+- A bytecode disassembler that prints opcodes alongside the source line that produced them, to make optimisation passes debuggable.
+- Constant-folding and dead-signal elimination. Today, an unreferenced signal still emits its bytecode.
+- A GPU-vs-CPU VM parity test in CI that runs the same program on both paths over a shared fixture and diffs per-tick register values.
+
+Code @ [github.com/zeta1999/gpu-backtest-public](https://github.com/zeta1999/gpu-backtest-public).

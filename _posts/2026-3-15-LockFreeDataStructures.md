@@ -1,43 +1,41 @@
 ---
 layout: post
-title: "Building Lock-Free Data Structures That Actually Work"
+title: "Thetis26: lock-free / wait-free data structures, with formal models"
 ---
 
-[Thetis26](https://github.com/zeta1999/Thetis26-public) is a C++20 library of lock-free and wait-free concurrent data structures. It started as a personal challenge — could I build concurrent containers that are both fast and provably correct? — and grew into something I use as the foundation for several other projects.
+A short post on one of my personal C++20 repos: [Thetis26-public](https://github.com/zeta1999/Thetis26-public).
 
-## What's In It
+## Scope
 
-The library includes SPSC and MPMC ring buffers, concurrent dense hashmaps, skip lists, stacks, and priority queues. Each data structure comes in three variants where it makes sense: locked (mutex baseline), lock-free (CAS-based progress guarantee), and wait-free (bounded-step completion for every thread).
+The repo is broader than just data structures — it also has low-latency networking (UDP/multicast, TCP, TLS via mbedTLS, WebSocket, HTTP), post-quantum crypto (ML-KEM-768, ML-DSA-65, XChaCha20-Poly1305), a handful of exchange WebSocket connectors, and demo apps (a VDF database, a UDP camera pipeline). In this post I only cover the concurrent data-structure side.
 
-The current benchmarks on x86_64:
-- **SPSC ring buffer**: 379M ops/sec
-- **Dense hashmap (wait-free)**: 117M ops/sec
+## Data structures
 
-It cross-compiles to x86_64, ARM64, RISC-V 32, FreeBSD, and ESP32, with CI running on all targets.
+Ring buffer (SPSC, MPMC v1-v4, LRQ), dense hashmap, ordered dict (skip list), stack (Treiber + elimination), priority queue. Each one ships as three variants when it makes sense: lock-based (mutex baseline), lock-free (CAS with explicit `std::memory_order`), wait-free (Kogan-Petrank-style helping, or equivalent per structure).
 
-## Why Formal Verification Matters Here
+The primitives below them are worth a mention: RDCSS/MCAS, 128-bit CAS2 on x86_64 (64-bit on RISC-V 32), epoch-based reclamation, a OneFile wait-free STM, a cache-line-aligned pool allocator.
 
-Testing concurrent code is necessary but deeply insufficient. You can run millions of iterations of a multithreaded test and miss a bug that only manifests under a specific interleaving that your scheduler happens to never produce. The classic bugs — ABA problems, missed wakeups, memory ordering violations — hide in the exponential space of thread interleavings.
+Numbers per structure and per platform are in `docs/benchmark_summary.md` and `docs/performance.md`; I'd rather point you there than quote cherry-picked figures.
 
-Thetis26 uses five verification tools across 20 models:
+## Formal models
 
-- **TLA+** for high-level algorithm correctness — does the ring buffer actually behave like a FIFO under all interleavings?
-- **CBMC** (C Bounded Model Checker) for implementation-level verification — does *this specific C++ code* match the TLA+ spec?
-- **SPIN** for protocol-level properties — liveness, deadlock freedom
-- **GenMC** for memory model verification — are the `std::memory_order` annotations correct under the C++20 memory model?
+`models/` has CBMC, GenMC, SPIN, TLA+, Nidhugg, plus some Lean material — five model checkers in active use, with ~20 models total covering the key data structures. The division of labor:
 
-The combination matters. TLA+ can tell you your algorithm is correct, but it operates on an abstraction. CBMC checks the actual code but has bounded depth. GenMC specifically targets weak memory model bugs — the kind where `memory_order_relaxed` vs `memory_order_acquire` is the difference between correct and subtly broken.
+- TLA+ for algorithm-level invariants (is the ring buffer actually a FIFO under all interleavings?).
+- CBMC for bounded checking of the C++ itself.
+- SPIN for protocol-level liveness / deadlock freedom.
+- GenMC (RC11) and Nidhugg (TSO/PSO/POWER) for memory-model bugs: the cases where `memory_order_relaxed` vs `memory_order_acquire` is the difference.
 
-## The Hard Parts
+The reason for the split: TLA+ tells you the abstract algorithm is fine, but on an abstraction. CBMC and the stateless model checkers (GenMC, Nidhugg) operate on the code. For weak memory you really need the last one — x86-TSO hides bugs that ARM64 will happily expose.
 
-**Memory orderings are the real enemy.** The algorithm for a lock-free hashmap is well-known. Getting the memory orderings right so it works on ARM64 (which has a weaker memory model than x86) is where the months go. x86's TSO memory model hides bugs that ARM64 will happily expose in production.
+## Cross-compile
 
-**Wait-free is genuinely harder than lock-free.** Lock-free guarantees that *some* thread makes progress. Wait-free guarantees that *every* thread completes in bounded steps. The difference sounds academic until you have a real-time constraint — if you need guaranteed worst-case latency per operation, lock-free isn't enough. The wait-free variants use helping mechanisms where faster threads assist slower ones, which adds complexity but gives you that bounded-step guarantee.
+Builds and tests on x86_64 Linux, ARM64 Linux, macOS (Apple Silicon), RISC-V 32, FreeBSD, and ESP32-C3/S3 (the S3 is compile-only; FreeBSD full-VM tests work on x86_64 Linux with KVM only, not on Apple Silicon — worth being honest about). CI scripts live under `scripts/ci_multiplatform.sh` and the per-target `cross_*.sh` wrappers.
 
-**Cross-platform atomics on embedded targets** (ESP32, RISC-V 32) require careful fallback strategies. Not every target supports every atomic width natively — you need to know where the compiler is inserting lock-based fallbacks for your "lock-free" code.
+One thing that bit me on embedded targets: not every RISC-V 32 / ESP32 target supports every atomic width natively, so `std::atomic<T>` with a wide `T` can silently fall back to a lock-based shim. Worth checking the generated code rather than assuming the "lock-free" label from `std::atomic::is_lock_free()` means what you hope.
 
-## What I'd Do Differently
+## What I'd change
 
-If I started over, I'd write the TLA+ specs first, before any C++. I did it the other way around for the first few data structures — write the code, then verify — and the verification step caught real bugs that would have been design-level catches with specs-first.
+Mostly: write the TLA+ spec before the C++, not after. I did it in the wrong order for the first few structures, and the model-checker found things that would have been obvious design-time catches. Not a novel lesson, just one I had to re-learn.
 
-The repo is at [github.com/zeta1999/Thetis26-public](https://github.com/zeta1999/Thetis26-public).
+Code @ [github.com/zeta1999/Thetis26-public](https://github.com/zeta1999/Thetis26-public).

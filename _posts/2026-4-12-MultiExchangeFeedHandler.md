@@ -1,53 +1,69 @@
 ---
 layout: post
-title: "Building a Multi-Exchange Feed Handler: 17 Exchanges, One Interface"
+title: "notbbg feed adapters: what's actually in the ~17 of them (updated)"
 ---
 
-In a [previous post]({% post_url 2026-4-1-MarketDataTerminal %}) I introduced [notbbg](https://github.com/zeta1999/this-is-not-bbg-public). This post goes deeper into the feed handler architecture — how you normalize data from 17 different exchanges with different APIs, protocols, and quirks into a single coherent interface.
+Follow-on to the [notbbg terminal post]({% post_url 2026-4-1-MarketDataTerminal %}). This one is the feed-adapter layer, described honestly against the code rather than as a sales page.
 
-## The Diversity Problem
+The earlier draft of this post made several features sound more sophisticated than they are — exponential backoff, sequence-gap resync, clock-drift handling, queued prioritised rate limiting, encrypted-at-rest datalake. None of those are in the repo. This is what's actually there.
 
-No two exchanges speak the same language. Some give you WebSocket streams of JSON. Some use FIX protocol. Some have REST-only APIs with rate limits. Some provide multicast UDP feeds for co-located clients. Some send full order book snapshots every second; others send incremental deltas and expect you to maintain state.
+## The ~17 "feeds" are mostly not exchanges
 
-The data formats are equally inconsistent. Timestamps might be Unix milliseconds, microseconds, ISO 8601, or exchange-local time. Prices might be floats, strings, or integers with an implicit decimal point. Instrument identifiers follow no standard — the same asset is "BTCUSDT" on one exchange and "BTC-USDT" on another.
+`server/internal/feeds/` is organised by source *kind*, not by "exchange":
 
-You need an adapter per exchange, and you need every adapter to produce the same normalized output.
+- `ccxt/` — 6 centralised venues over WebSocket: Binance, OKX, Bybit, Bitget, Coinbase, Kraken.
+- `dex/` — Hyperliquid (perps), plus Jupiter, Raydium, Uniswap HTTP clients, plus `defi_protocols.go` / `more_protocols.go`.
+- `world/` — CoinGecko, Yahoo Finance, FRED, Fear/Greed index, mempool.space. These are macro / aggregator, not exchanges.
+- `rss/` — a single module sweeping 20+ news feeds.
 
-## The Adapter Pattern
+So "17 exchanges" was wrong. It's ~17 adapters across CEX, DEX, macro, and news.
 
-Each exchange gets its own adapter module that handles:
+## What each CCXT adapter actually does
 
-1. **Connection management** — WebSocket reconnection with exponential backoff, session keepalive, authentication token refresh
-2. **Protocol handling** — parsing the exchange's specific message format (JSON, FIX, binary)
-3. **Normalization** — converting to a common internal format: `(timestamp_ns, exchange, instrument, event_type, price, quantity, side)`
-4. **Rate limiting** — respecting per-exchange API limits, queueing requests when throttled
-5. **Clock synchronization** — converting exchange timestamps to a common nanosecond epoch, accounting for clock drift
+Looking at `binance.go`, `bybit.go`, `okx.go`, `bitget.go`, `coinbase.go`, `kraken.go`, they're the same shape:
 
-The adapter interface is a trait (in Go terms, an interface) that every exchange module implements. The rest of the system — LOB construction, OHLC aggregation, alerting, storage — only sees normalized events.
+1. Open a WebSocket to the venue, subscribe to the requested topics (orderbook / kline / trades / tickers).
+2. Parse incoming JSON into Go structs.
+3. Convert into `feeds.LOBSnapshot` / `feeds.Trade` / etc., push onto the bus with a topic like `lob.binance.BTCUSDT`.
+4. If the connection drops, `time.Sleep(5 * time.Second)` and reconnect. That is the entire backoff policy — a fixed five seconds, not exponential, not jittered.
+5. Rate limiting is `time.Sleep(time.Second / max(rateLimit, 1))` between REST calls. No priority queue, no per-instrument weighting, no graceful degradation when throttled — just a fixed-interval throttle.
 
-## The Hard Parts
+Things you might expect and that are **not** there:
 
-**Reconnection under load.** WebSocket connections drop. The exchange might restart, your network might blip, or the exchange might disconnect idle clients. The reconnection logic needs to:
-- Detect the disconnect quickly (heartbeat timeout)
-- Reconnect without losing data (request a snapshot after reconnection)
-- Handle the gap between disconnect and reconnection (mark the book state as stale)
-- Not thundering-herd all 17 adapters when your network comes back
+- No FIX protocol support. All CCXT adapters are WebSocket + JSON.
+- No multicast UDP adapter. Everything is TCP/WebSocket.
+- No sequence-gap detection. Grep for `sequence`, `lastUpdateId`, `update_id`, `seqnum` returns nothing in the adapters. If a delta is missed between snapshots, the downstream book is wrong until the next snapshot overwrites it. This is the single biggest gap if you care about book correctness.
+- No clock-drift handling. No NTP integration, no per-adapter offset estimation.
+- No auth-token refresh flows (the adapters only subscribe to public channels).
 
-**Sequence gaps.** Some exchanges provide sequence numbers on their delta feeds. If you see sequence 1001 after 999, you missed 1000. You need to detect this, request a fresh snapshot, and rebuild the book. If the exchange doesn't provide sequence numbers, you're relying on snapshot frequency to catch drift.
+So the CCXT layer is a straightforward WebSocket-subscribe-and-normalize, not a hardened feed handler.
 
-**Rate limits and backpressure.** REST-based exchanges impose rate limits (e.g., 1200 requests/minute). If you're polling 50 instruments at 1-second intervals, you're already at 3000 requests/minute. The adapter needs to batch requests, prioritize active instruments, and degrade gracefully when throttled.
+## DEX / HTTP adapters
 
-## The Data Lake
+`dex/` and `world/` are HTTP-polling shaped: a tick interval, a `GET`, parse, push to bus. Same idea, different transport. Jupiter and Raydium pull DEX trades; Uniswap is on-chain via its subgraph-shaped API. `world/mempool.go` polls mempool.space for L1 fee data; `world/fred.go` pulls macro series; `world/feargreed.go` is a daily sentiment pull.
 
-Normalized events flow into a Hive-partitioned datalake — partitioned by exchange, instrument, and date. This serves two purposes:
+The common thread: polling loops with a ticker, no backpressure from the bus back to the poller. If the bus is slow, the ring buffer in `bus/bus.go` drops oldest entries — the poller doesn't slow down.
 
-1. **Historical replay** — feed the same data into gpu-backtest for backtesting
-2. **Post-quantum encrypted backup** — the datalake is encrypted at rest with ML-KEM-768 derived keys, so historical market data is protected against future quantum attacks
+## Normalised schema
 
-The backup encryption might seem paranoid for market data, but the same infrastructure handles order flow and position data — and those are worth protecting.
+Topics land on the bus in the shape `{type}.{venue}.{instrument}` — e.g. `lob.binance.BTCUSDT`, `trade.bybit.ETHUSDT`, `ohlc.yahoo.AAPL`. Payloads are Go structs under `server/internal/feeds/` with `price` / `qty` / `timestamp` as normalised fields. That normalisation *is* the meaningful work the adapters do: timestamps into nanoseconds, strings-of-floats into `float64`, instrument names into a lowercase canonical form.
 
-## Terminal and Mobile
+## Clients
 
-The TUI (terminal) interface renders live order books, OHLC charts, and aggregated views across exchanges. React Native provides a mobile interface for monitoring on the go. Both consume the same normalized event stream.
+Three, not two: TUI (Bubble Tea), Desktop (Electron), Phone (React Native, marked experimental). The last post already corrected this — repeating it here because the earlier draft of this post repeated the same miss.
 
-The repo is at [github.com/zeta1999/this-is-not-bbg-public](https://github.com/zeta1999/this-is-not-bbg-public).
+## Datalake is not encrypted at rest
+
+Correcting the previous draft directly: `server/internal/datalake/writer.go` writes plain Hive-partitioned JSONL (or CSV) under `type/exchange/instrument/date/`. No encryption applied at the file level. The ML-KEM-768 layer in `server/internal/transport/pqc.go` is for the **transport** between the main server and an optional remote collector — it protects the stream in flight, not the files on disk.
+
+If you want encryption at rest, it's currently your filesystem's job (e.g. LUKS / FileVault), not notbbg's.
+
+## What I'd do next
+
+- Sequence-gap detection on venues that expose `u`/`U`/`lastUpdateId` (Binance, Bybit). Detect the gap, hit the REST snapshot endpoint, rebuild the side, resume applying deltas. This is the single biggest correctness improvement.
+- Exponential backoff with jitter on reconnect. Five-second fixed sleep thunders on outages.
+- Bus-side credit flow control back to adapters so a slow datalake writer doesn't invisibly drop old ring-buffer entries.
+- Actual rate-limit budgets modelled per endpoint (weighted on Binance, segmented on Coinbase), not a global sleep divider.
+- If the datalake ever holds position/order data rather than just public market data, an at-rest encryption layer (XChaCha20-Poly1305 with a session key, same shape as `rust-secure-memory`) rather than outsourcing to the filesystem.
+
+Code @ [github.com/zeta1999/this-is-not-bbg-public](https://github.com/zeta1999/this-is-not-bbg-public).

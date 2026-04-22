@@ -3,35 +3,33 @@ layout: post
 title: "Regime-Aware Market Making with HMM + HJB"
 ---
 
-I came across a project by [pellera9](https://github.com/pellera9) that caught my attention: [regime-aware-optimal-quoting](https://github.com/pellera9/regime-aware-optimal-quoting). It's a clean implementation of something I've spent a lot of time thinking about — optimal market making under regime switching — and I think it deserves more visibility.
+A repo worth a look: [ahmetsbilgin/regime-aware-optimal-quoting](https://github.com/ahmetsbilgin/regime-aware-optimal-quoting), a Birkbeck MSc dissertation on extending Avellaneda-Stoikov to regime switching.
 
-## What It Does
+## What it does
 
-The classic Avellaneda-Stoikov (2008) model gives you optimal bid/ask quotes for a market maker with CARA utility and inventory risk. It's elegant, but it assumes the market behaves the same way all the time — same volatility, same order arrival rates, same spread dynamics. Anyone who has actually traded knows that's not true.
+Four pieces:
 
-This project extends Avellaneda-Stoikov to handle regime switching:
+1. Rolling-window LOB features: log-return, realized vol, relative spread, depth imbalance.
+2. Gaussian HMM with sticky self-transition priors (EM, log-space forward-backward).
+3. Regime-coupled HJB solved backward by ODE integration, one value function per regime with transitions via a generator matrix Q.
+4. Online Bayesian filter for the current regime posterior, used to blend quotes at runtime.
 
-1. **Feature extraction from LOB data** — microstructure features from the limit order book (spread, depth imbalance, trade flow)
-2. **Gaussian HMM with sticky priors** — detect latent market regimes without state flickering
-3. **Regime-dependent HJB solver** — solve the Hamilton-Jacobi-Bellman optimal control problem separately per regime
-4. **Online Bayesian filtering** — maintain a posterior over the current regime and blend optimal quotes at runtime
+## What I found interesting
 
-## Why This Is Interesting
+The HMM fits the problem: regime detection here is filtering, not classification. Sticky priors keep the posterior from flickering, which would otherwise destabilize the quotes downstream.
 
-Most academic market making papers stop at the HJB solution under a single set of parameters. The gap between that and something deployable is enormous. This project bridges several of those gaps.
+The HJB is regime-coupled rather than "A-S run per regime": the backward ODE accounts for the chance of regime transitions within the horizon. If you are in a low-vol regime but likely to transition to high-vol, your current quotes already reflect it.
 
-**The HMM is the right tool here.** Regime detection for market making is a filtering problem, not a classification problem. HMMs give you a posterior distribution over states, and the forward algorithm is fast enough for real-time use. The sticky prior (vectorized EM with Dirichlet self-transition bias) prevents the state flickering that would make downstream quoting unstable.
+## Caveats
 
-**The HJB solver is regime-coupled.** This isn't just "run Avellaneda-Stoikov with different vol estimates." The backward ODE integration accounts for the possibility of regime transitions during the trading horizon. If you're in a low-vol regime but there's a 15% chance of transitioning to high-vol in the next 30 minutes, your optimal quotes should already reflect that.
+The backtest simulator (`src/backtest/simulator.py`, `src/execution/order_manager.py`) uses naive crossing fills at top-of-book, unit size, no queue position, no partial fills. That is the main gap for a market-making backtest — adverse selection is modeled in the control problem but not in the fill simulation.
 
-**Walk-forward validation.** The project includes a proper walk-forward test harness with parameter grid search — the right way to evaluate trading strategies.
+The README advertises walk-forward validation and grid search, but I did not find the harness in `examples/` — there is a single-run `run_backtest.py`, no walk-forward loop. Possibly in a branch or not yet committed.
 
-**The LOB simulator models fills realistically** — queue position, partial fills, adverse selection. Not just "if price crosses your quote, you're filled." This matters because fill modeling is where most backtesters silently lie.
+## Things I would add
 
-## What I'd Add
+- Heavy-tailed emissions for the HMM.
+- GPU port of the backward ODE: embarrassingly parallel across the inventory grid.
+- Online HMM updates rather than a fixed historical fit.
 
-- **Non-Gaussian emissions** — heavy-tailed distributions for the observation model
-- **GPU acceleration of the HJB solver** — the backward ODE is embarrassingly parallel across the inventory grid
-- **Online HMM parameter updates** — adapt to structural changes rather than relying on a fixed historical fit
-
-Solid work. The repo is at [github.com/pellera9/regime-aware-optimal-quoting](https://github.com/pellera9/regime-aware-optimal-quoting).
+Code @ [github.com/ahmetsbilgin/regime-aware-optimal-quoting](https://github.com/ahmetsbilgin/regime-aware-optimal-quoting).
