@@ -6,23 +6,32 @@ layout: default
 
 <h2>About</h2>
 
-<p>I build low-latency systems, blockchain protocols, and secure infrastructure in C++20 and Rust.</p>
+<p>Engineer working across low-latency C++, Rust systems, quantitative finance, and AI/ML. 21 years of experience. École Polytechnique (X1999), University of Tokyo (Scientific Computing, 2004), DASCA Certified Principal Data Scientist.</p>
 
-<p><strong>Recent projects:</strong></p>
+<p>Previously: APAC Head of Equity Derivatives Quant Strategies at HSBC; Senior / Head Quant at Shinhan Investment Corp. and KB Securities; Senior Acceleration Architect at Maxeler Technologies (FPGA-accelerated Monte Carlo for a tier-one bank platform); Senior Developer on a multi-exchange DMA/HFT options engine at Webb Traders; earlier roles at Standard Chartered, Daiwa Capital Markets, Dexia Credit Local, JP Morgan Chase, Numerix Japan. Currently Lead Engineer at Anzaetek Inc. in Seoul.</p>
+
+<p>Most of what I ship these days is either closed-source fintech work at Anzaetek (Sqetch platform, time_series_base, finance_lab, omega-functions, portfolio optimisation) or the public personal projects below. Blog posts here describe each with a "what I'd claim / what I wouldn't claim" discipline — the code is the source of truth.</p>
+
+<p><strong>Public projects (all WIP-honest):</strong></p>
 <ul>
-  <li><a href="https://github.com/zeta1999/Thetis26-public">Thetis26</a> — Lock-free/wait-free concurrent data structures (C++20). Formally verified.</li>
-  <li><a href="https://github.com/SealProjectDAO/seal-dao-public">Seal DAO</a> — Post-quantum blockchain with native SQL database (Rust).</li>
-  <li><a href="https://github.com/zeta1999/gpu-backtest-public">gpu-backtest</a> — GPU-accelerated HFT backtester with Aria strategy language (Rust/CUDA).</li>
-  <li><a href="https://github.com/zeta1999/this-is-not-bbg-public">notbbg</a> — Real-time market data terminal (Go/C++).</li>
-  <li><a href="https://github.com/zeta1999/rust-secure-memory-public">rust-secure-memory</a> — Secure memory with post-quantum KEM (Rust).</li>
-  <li><a href="https://github.com/zeta1999/numerical-algorithms">numerical-algorithms</a> — Formalization of numerical algorithms (WIP).</li>
+  <li><a href="https://github.com/zeta1999/Thetis26-public">Thetis26</a> — C++20 lock-free / wait-free data structures. Ring buffers (SPSC / MPMC), dense hashmap, skip list, priority queue. Multi-tool formal verification: TLA+, CBMC, SPIN, GenMC, Nidhugg, Lean 4. Cross-platform: x86_64, ARM64, RISC-V 32, ESP32.</li>
+  <li><a href="https://github.com/SealProjectDAO/seal-dao-public">Seal DAO</a> (WIP) — SQL-native L1 in Rust, with post-quantum signatures (ML-DSA-65) and a PQ VRF (ML-DSA + SHA3). Rocq, Lean 4, TLA+, Kani, Miri, cargo-fuzz verification stack. Several components still scaffolded; see the blog post for what's real vs placeholder.</li>
+  <li><a href="https://github.com/zeta1999/gpu-backtest-public">gpu-backtest</a> (WIP) — Rust backtesting engine with the Aria strategy DSL (bytecode compiler, register-machine VM running on CPU / CUDA / Metal / OpenCL), snapshot+delta LOB reconstruction, DuckDB data layer.</li>
+  <li><a href="https://github.com/zeta1999/this-is-not-bbg-public">notbbg</a> — Go real-time market-data terminal. TUI (Bubble Tea) + Electron desktop + React Native phone clients. ~17 feed adapters across CEX (Binance / OKX / Bybit / Bitget / Coinbase / Kraken), DEX (Hyperliquid / Jupiter / Raydium / Uniswap), macro (CoinGecko / Yahoo / FRED / mempool), news (RSS). Optional PQC-wrapped TLS to a remote collector.</li>
+  <li><a href="https://github.com/zeta1999/rust-secure-memory-public">rust-secure-memory</a> — Rust port of Go's memguard. mlock, guard pages, XChaCha20-Poly1305 enclaves, ML-KEM-768 KEM. Kani harnesses + Lean 4 proofs. Includes <code>sedit</code>, an encrypted TUI text editor.</li>
+  <li><a href="https://github.com/zeta1999/fpga-meta-compiler-public">fpga-meta-compiler</a> (WIP) — Aria-HDL, a DSL compiling to Verilog / VHDL / Verilator / SVA + SymbiYosys / Lean 4 / CUDA / Metal / OpenCL / resource JSON. Leiserson-Saxe retiming, CDC hard-errors. Several features still thin; see the blog posts.</li>
+  <li><a href="https://github.com/zeta1999/numerical-algorithms">numerical-algorithms</a> (WIP) — LU (Doolittle) and QR (Modified Gram-Schmidt) each implemented twice: Lean 4 (ℚ + Float) and F* (fraction-free integer, Z3-verified). Triangularity of output factors proved; full correctness statements still axiomatised + fuzzed.</li>
 </ul>
+
+<p><strong>Blog:</strong> see the <a href="/">post list</a> — recent entries cover all the projects above, plus 2020-2025 retrospective posts on earlier private work (Atlas on AWS Braket, Aegis event log, Sensor-Stream-Pipe contributions, QuetzalcoatlProto quantum R&D, Sibelius pricing library, Thetis v1).</p>
+
+<p><strong>Publication:</strong> <em>Some usages of functional programming for FO and quants</em>, CUFP 2014.</p>
 
 <p><strong>Links:</strong></p>
 <ul>
   <li><a href="https://renoir42.com">renoir42.com</a></li>
   <li><a href="https://seal-dao.network">SEAL DAO</a></li>
-  <li><a href="https://github.com/zeta1999">GitHub</a></li>
+  <li><a href="https://github.com/zeta1999">GitHub (zeta1999)</a></li>
 </ul>
 
 <p>Contact: <a href="mailto:renoir42@renoir42.com">renoir42@renoir42.com</a></p>
