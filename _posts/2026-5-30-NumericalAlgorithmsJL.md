@@ -41,6 +41,23 @@ In words: project `n` points from `ℝ^d` to `ℝ^m` with a Gaussian random matr
 
 `WALKTHROUGH.md` explains each section in prose next to the Lean tactics, and `article.tex` is the same as a typeset PDF. mathlib is vendored as prebuilt `.olean`s, so `lake build JL` only compiles the eight files — no mathlib rebuild.
 
+## Why this is load-bearing in LLM serving, not just a textbook lemma
+
+If you only ever hear "Johnson–Lindenstrauss" in a proofs class it sounds like a curiosity: you can jam `n` points from a huge dimension `d` down to `m ≈ log n / ε²` dimensions with a random matrix and barely move any pairwise distance. Fine. Why would anyone shipping LLMs care?
+
+Because an LLM is not made of words — it's made of vectors. Every token is an embedding in `ℝ^d` (think `d` = thousands), and attention is *literally* a pile of inner products between those vectors. The model is geometry. Which means the two things that actually blow up your memory budget in production are both "store a lot of high-dimensional vectors and keep their inner products intact":
+
+- **The KV-cache.** During generation a transformer keeps the key/value vector of every past token so it doesn't recompute them. That cache grows with context length × attention heads × concurrent requests — it, not the weights, is the memory wall in LLM serving. People who say "just use a bigger context window" usually have no idea this is what they're spending.
+- **Vector databases / RAG.** Retrieval stuffs millions of document embeddings into an index and answers a query by nearest-inner-product search. Same problem: too many vectors, too many bits each.
+
+The obvious move is to store each coordinate in fewer bits. The obvious risk is that naive rounding wrecks exactly the inner products attention and retrieval depend on. "Compress these vectors with a cheap, randomized map that *provably* preserves inner products up to a bounded error" is not a hack you reach for — it's the JL lemma, restated as an engineering requirement.
+
+That's precisely what the current state-of-the-art does. **[TurboQuant](https://arxiv.org/abs/2504.19874)** (Zandieh et al., Google Research, 2026) quantizes a vector in three JL-flavored steps: randomly **rotate** it with an orthogonal transform (a JL-style random map) so its coordinates land in a stable, well-behaved distribution; apply an MSE-optimal scalar quantizer; then encode the leftover residual with a **1-bit Quantized Johnson–Lindenstrauss (QJL)** sketch. JL is the part that guarantees the rotation and the 1-bit sketch keep inner products *unbiased* — that's the whole reason the scheme works at 1–4 bits per coordinate while staying within ≈2.7× of the Shannon lower bound on distortion. It's data-oblivious and online, which is why it drops straight into KV-cache compression and vector indexes.
+
+**TurboVec** — a Rust vector index with Python bindings, built directly on TurboQuant for local RAG — is the same lemma cashed out as a product: a 31 GB float32 corpus of ~10M embeddings fits in about 4 GB, and you still search it on inner products. It inherits its accuracy guarantee from JL through TurboQuant; there is nothing else holding the error down.
+
+So the chain is short and worth stating plainly for anyone who throws "LLM" around without knowing what a DNN actually computes: **JL lemma → random rotation + 1-bit QJL → TurboQuant → TurboVec / KV-cache / RAG.** The probabilistic concentration bound formalized above — `m` large enough and the chance of *any* distorted inner product is below `δ` — is the exact promise these systems bet their output quality on, usually on faith and a benchmark table. The point of doing it with no `sorry` is that "the random projection preserves the geometry" stops being a vibe and becomes a kernel-checked theorem.
+
 ## Randomized SVD — started, not proved
 
 `randomized-svd/` is the opposite end of the maturity scale: a Rust implementation built from scratch, correctness first, against "Pass-efficient randomized SVD with boosted accuracy." It uses a PerSVD scheme with shifted power iteration and an economy inner SVD via `svd_from_eig`, with QR by modified Gram-Schmidt + re-orthogonalization. The plan (in `specs.txt`) is to compare f32 / f64 / 2×f64 (quad) precision with Kahan summation and look at high-accuracy inner SVD (twisted factorization, the Fernando approach).
