@@ -17,6 +17,6 @@ The obvious question is whether lookahead actually helps or just burns tokens. S
 
 A 35B world model is not what you want running on a laptop next to the agent. Phase 3 is distillation: take **AgentWorld-35B** as the teacher and train smaller students against it — a **1B** student first, then **3B** and **8B** for the scaling picture. Each is benchmarked against the teacher so the trade-off is explicit rather than assumed.
 
-The point of the whole exercise is local-first: a harness where the loop, the lookahead, and increasingly the model itself can run on hardware you control. That's the thread connecting Le Harnais to the rest of what I build — [leanlift](https://github.com/zeta1999/leanlift) for proof automation, the security toolkit for review, and the [simple tools](https://github.com/zeta1999/simple-tools) libraries for everything the agent reaches for.
+The point of the whole exercise is local-first: a harness where the loop, the lookahead, and increasingly the model itself can run on hardware you control. That's the thread connecting Le Harnais to the rest of what I build — [leanlift](https://github.com/zeta1999/leanlift) for proof automation, the security toolkit for review, and the [simple tools](https://renoir42.com/simple-tools.html) libraries for everything the agent reaches for.
 
 Public release is coming. The design bet is local-first; whether the world model and its lookahead are worth their cost is left to the measurements rather than asserted here.
